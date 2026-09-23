@@ -12,9 +12,14 @@ from __future__ import annotations
 
 import hashlib
 import random
+import re
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 DB_PATH = Path(__file__).resolve().parent / "storage.db"
 
@@ -598,28 +603,6 @@ def seed_test_data(
     return stats
 
 
-def main() -> None:
-    print(f"Инициализация БД: {DB_PATH}")
-    conn = init_db(DB_PATH)
-    stats = seed_test_data(conn, clear=True)
-    conn.close()
-
-    print("Готово. Загружено:")
-    for key, value in stats.items():
-        if key == "outlier_client_hash":
-            print(f"  {key}: {value[:16]}…")
-        else:
-            print(f"  {key}: {value}")
-    print(
-        "\nАномально крупные заказы одного клиента добавлены с is_outlier=0 — "
-        "их должен пометить detect_outliers()."
-    )
-
-
-if __name__ == "__main__":
-    main()
-
-
 def apply_moq_rounding(
     recommended_qty: float, min_ship_qty: int, multiplicity: int
 ) -> tuple[float, str]:
@@ -645,3 +628,107 @@ def apply_moq_rounding(
             f"(мин. партия {min_ship_qty}, кратность {multiplicity})",
         )
     return float(rounded), "соответствует условиям поставщика"
+
+
+# ---------------------------------------------------------------------------
+# Read-only SQL для ИИ-ассистента (только SELECT)
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_SQL_RE = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|"
+    r"PRAGMA|VACUUM|REINDEX|TRUNCATE|GRANT|REVOKE|EXEC|EXECUTE)\b",
+    re.IGNORECASE,
+)
+
+AGENT_SCHEMA_SUMMARY = """
+Таблицы SQLite (storage.db):
+- suppliers(supplier_id, supplier_name, lead_time_days, created_at)
+- products(product_id, code_1c, supplier_article, name, unit, category,
+  supplier_id, min_ship_qty, multiplicity, is_active, unit_cost, created_at)
+- sales_transactions(transaction_id, sale_date, doc_number, doc_name, product_id,
+  unit, warehouse, quantity, client_hash, is_outlier, outlier_reason, imported_at)
+  quantity < 0 = отгрузка клиенту; client_hash — обезличенный sha256
+- monthly_stock(id, product_id, warehouse, year, month, stock_qty)
+- monthly_sales(id, product_id, year, month, qty_sold)
+- stockout_periods(id, product_id, warehouse, start_date, end_date, days_out,
+  detection_method, created_at)
+- transit_orders(id, product_id, po_number, po_date, expected_arrival, quantity,
+  created_at)
+- seasonality_reference(id, supplier_id, category, year, month, total_value)
+- recommended_orders(id, run_id, product_id, supplier_id, base_demand,
+  seasonality_adj, stockout_adj, outlier_excluded_qty, current_stock,
+  in_transit_qty, recommended_qty, urgency, justification, status,
+  created_at, approved_by, approved_at)
+  urgency IN ('низкая','средняя','высокая','критическая');
+  status IN ('draft','approved','rejected','sent')
+""".strip()
+
+
+def is_safe_select(sql: str) -> tuple[bool, str]:
+    """Проверяет, что SQL — одиночный безопасный SELECT (без записи/DDL)."""
+    if not sql or not str(sql).strip():
+        return False, "пустой SQL"
+
+    cleaned = str(sql).strip().rstrip(";").strip()
+    if ";" in cleaned:
+        return False, "разрешён только один statement"
+
+    upper = cleaned.upper().lstrip()
+    if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+        return False, "разрешены только SELECT / WITH … SELECT"
+
+    if _FORBIDDEN_SQL_RE.search(cleaned):
+        return False, "обнаружены запрещённые ключевые слова (только чтение)"
+
+    return True, "ok"
+
+
+def execute_readonly_query(
+    sql: str,
+    *,
+    db_path: Path | str = DB_PATH,
+    limit: int = 200,
+):
+    """
+    Выполняет только безопасный SELECT и возвращает DataFrame (до `limit` строк).
+    Бросает ValueError, если запрос не read-only.
+    """
+    import pandas as pd
+
+    ok, reason = is_safe_select(sql)
+    if not ok:
+        raise ValueError(f"Небезопасный SQL: {reason}")
+
+    cleaned = str(sql).strip().rstrip(";").strip()
+    if "LIMIT" not in cleaned.upper():
+        cleaned = f"{cleaned}\nLIMIT {int(limit)}"
+
+    path = Path(db_path)
+    uri = f"file:{path.resolve().as_posix()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        return pd.read_sql_query(cleaned, conn)
+    finally:
+        conn.close()
+
+
+def main() -> None:
+    print(f"Инициализация БД: {DB_PATH}")
+    conn = init_db(DB_PATH)
+    stats = seed_test_data(conn, clear=True)
+    conn.close()
+
+    print("Готово. Загружено:")
+    for key, value in stats.items():
+        if key == "outlier_client_hash":
+            print(f"  {key}: {value[:16]}…")
+        else:
+            print(f"  {key}: {value}")
+    print(
+        "\nАномально крупные заказы одного клиента добавлены с is_outlier=0 — "
+        "их должен пометить detect_outliers()."
+    )
+
+
+if __name__ == "__main__":
+    main()

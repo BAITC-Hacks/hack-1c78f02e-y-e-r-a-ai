@@ -4,12 +4,16 @@ Y.E.R.A. AI — Streamlit UI для рекомендованных заказо�
 Запуск:
   streamlit run app.py
 
-Страницы: Дашборд / Остатки и продажи / Расчёт / Заказы / Настройки.
+Страницы: Дашборд / Остатки и продажи / Расчёт / Заказы /
+ИИ-Ассистент (Чат) / Настройки.
 Расчёт qty — только детерминированный core/, без LLM.
 """
 
 from __future__ import annotations
 
+import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -21,7 +25,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.pipeline import run_replenishment_calculation
-from database import DB_PATH, apply_moq_rounding, init_db, seed_test_data
+from database import (
+    DB_PATH,
+    apply_moq_rounding,
+    init_db,
+    seed_test_data,
+)
 from repository import (
     approve_orders,
     fetch_categories,
@@ -33,6 +42,16 @@ from repository import (
     fetch_suppliers,
     get_connection,
 )
+
+# Импорт SQL-хелперов для чата (отдельно — понятная ошибка, если модуль устарел)
+try:
+    from database import AGENT_SCHEMA_SUMMARY, execute_readonly_query
+except ImportError as _imp_err:  # pragma: no cover
+    raise ImportError(
+        "Не удалось импортировать AGENT_SCHEMA_SUMMARY / execute_readonly_query "
+        "из database.py. Сохраните database.py и перезапустите Streamlit "
+        f"(streamlit run app.py). Исходная ошибка: {_imp_err}"
+    ) from _imp_err
 
 # ---------------------------------------------------------------------------
 # Page config & styles
@@ -160,7 +179,14 @@ def render_sidebar() -> tuple[str, int | None, str | None]:
 
         page = st.radio(
             "Раздел",
-            ["Дашборд", "Остатки и продажи", "Расчёт", "Заказы", "Настройки"],
+            [
+                "Дашборд",
+                "Остатки и продажи",
+                "Расчёт",
+                "Заказы",
+                "ИИ-Ассистент (Чат)",
+                "Настройки",
+            ],
             label_visibility="collapsed",
         )
         st.divider()
@@ -593,6 +619,20 @@ def page_settings() -> None:
     st.write(f"**Путь к БД:** `{DB_PATH}`")
     st.write(f"**Файл существует:** {DB_PATH.exists()}")
 
+    st.subheader("OpenAI API")
+    current_key = st.session_state.get("openai_api_key") or os.environ.get(
+        "OPENAI_API_KEY", ""
+    )
+    new_key = st.text_input(
+        "API-ключ OpenAI",
+        value=current_key,
+        type="password",
+        help="Или задайте переменную окружения OPENAI_API_KEY. Ключ хранится в session_state.",
+    )
+    if new_key != current_key:
+        st.session_state["openai_api_key"] = new_key
+    st.caption("Ключ нужен для страницы «ИИ-Ассистент (Чат)».")
+
     st.subheader("Демо-данные")
     st.caption(
         "Пересоздаёт storage.db с тестовыми товарами ИЭК / Systeme Electric "
@@ -618,6 +658,307 @@ def page_settings() -> None:
 
 
 # ---------------------------------------------------------------------------
+# ИИ-Ассистент (Чат) — NL → безопасный SELECT → ответ
+# ---------------------------------------------------------------------------
+
+AGENT_PROMPT_PATH = ROOT / "agent_prompt.txt"
+CHAT_SQL_INSTRUCTIONS = """
+# РЕЖИМ SQL-АССИСТЕНТА
+По вопросу менеджера ты ДОЛЖЕН сначала сформировать безопасный SQL-запрос
+только типа SELECT (или WITH … SELECT) к SQLite storage.db, чтобы ответить
+цифрами из БД. Не считай количества заказов сам — только читай данные.
+
+Верни СТРОГО один JSON-объект без markdown-ограждений:
+{
+  "sql": "SELECT …",   // или null, если данные из БД не нужны
+  "reason": "кратко, зачем этот запрос"
+}
+
+Правила SQL:
+- Только чтение: запрещены INSERT/UPDATE/DELETE/DROP/ALTER/CREATE/PRAGMA/ATTACH.
+- Используй только таблицы и поля из схемы ниже.
+- JOIN по product_id / supplier_id где нужно.
+- quantity в sales_transactions отрицательный при отгрузке — для объёма продаж
+  используй ABS(quantity) или -quantity.
+- client_hash — обезличенный id; не пытайся раскрыть клиента.
+- Добавляй LIMIT (не больше 100), если выборка может быть большой.
+- Не выдумывай таблицы и колонки.
+
+""" + AGENT_SCHEMA_SUMMARY
+
+
+def _load_agent_system_prompt() -> str:
+    base = ""
+    if AGENT_PROMPT_PATH.exists():
+        base = AGENT_PROMPT_PATH.read_text(encoding="utf-8").strip()
+    return f"{base}\n\n{CHAT_SQL_INSTRUCTIONS}".strip()
+
+
+def _get_openai_api_key() -> str:
+    key = (
+        st.session_state.get("openai_api_key")
+        or os.environ.get("OPENAI_API_KEY")
+        or ""
+    )
+    if not key:
+        try:
+            key = st.secrets.get("OPENAI_API_KEY", "")  # type: ignore[attr-defined]
+        except Exception:
+            key = ""
+    return str(key or "").strip()
+
+
+def _extract_json_object(text: str) -> dict:
+    """Достаёт первый JSON-объект из ответа модели."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", text)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+def _openai_chat(
+    messages: list[dict],
+    *,
+    api_key: str,
+    temperature: float = 0.2,
+) -> str:
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=st.session_state.get("openai_model", "gpt-4o-mini"),
+        messages=messages,
+        temperature=temperature,
+    )
+    return (resp.choices[0].message.content or "").strip()
+
+
+def _dataframe_for_llm(df: pd.DataFrame, max_rows: int = 40) -> str:
+    if df.empty:
+        return "(пусто: 0 строк)"
+    preview = df.head(max_rows)
+    return preview.to_csv(index=False)
+
+
+def _run_yera_chat_turn(user_text: str, api_key: str) -> dict:
+    """
+    Один ход ассистента:
+    1) NL → JSON {sql, reason}
+    2) execute_readonly_query
+    3) форматированный ответ менеджеру (+ таблица при наличии строк)
+    """
+    system = _load_agent_system_prompt()
+    plan_raw = _openai_chat(
+        [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    "Сформируй JSON с безопасным SELECT для ответа на вопрос.\n"
+                    f"Вопрос менеджера: {user_text}"
+                ),
+            },
+        ],
+        api_key=api_key,
+        temperature=0.0,
+    )
+
+    sql: str | None = None
+    reason = ""
+    try:
+        plan = _extract_json_object(plan_raw)
+        raw_sql = plan.get("sql")
+        sql = str(raw_sql).strip() if raw_sql else None
+        reason = str(plan.get("reason") or "")
+    except (json.JSONDecodeError, TypeError, ValueError):
+        # Модель вернула не JSON — попробуем вытащить SELECT напрямую
+        m = re.search(
+            r"(?is)\b(WITH\b[\s\S]+SELECT\b[\s\S]+|SELECT\b[\s\S]+)",
+            plan_raw,
+        )
+        if m:
+            sql = m.group(1).strip().rstrip(";")
+        else:
+            return {
+                "content": plan_raw
+                or "Не удалось сформировать SQL по вопросу. Переформулируйте запрос.",
+                "dataframe": None,
+                "sql": None,
+            }
+
+    df: pd.DataFrame | None = None
+    sql_error: str | None = None
+    if sql:
+        try:
+            df = execute_readonly_query(sql, limit=100)
+        except Exception as exc:  # noqa: BLE001 — показываем менеджеру
+            sql_error = str(exc)
+
+    if sql_error:
+        answer = _openai_chat(
+            [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Вопрос: {user_text}\n"
+                        f"SQL: {sql}\n"
+                        f"Ошибка выполнения: {sql_error}\n"
+                        "Объясни менеджеру кратко на русском, без повторного SQL, "
+                        "что пошло не так и как переформулировать вопрос."
+                    ),
+                },
+            ],
+            api_key=api_key,
+        )
+        return {"content": answer, "dataframe": None, "sql": sql}
+
+    data_block = _dataframe_for_llm(df) if df is not None else "(запрос к БД не выполнялся)"
+    answer = _openai_chat(
+        [
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": (
+                    f"Вопрос менеджера: {user_text}\n"
+                    f"Зачем SQL: {reason or '—'}\n"
+                    f"SQL:\n{sql or 'не использовался'}\n\n"
+                    f"Результат из storage.db:\n{data_block}\n\n"
+                    "Ответь по-русски кратко и по делу. Ссылайся на цифры из результата. "
+                    "Не придумывай значения, которых нет в таблице. "
+                    "Не предлагай автоматически отправить заказ поставщику."
+                ),
+            },
+        ],
+        api_key=api_key,
+        temperature=0.3,
+    )
+
+    show_table = df is not None and not df.empty and len(df.columns) > 0
+    return {
+        "content": answer,
+        "dataframe": df if show_table else None,
+        "sql": sql,
+    }
+
+
+def page_chat_assistant() -> None:
+    st.markdown(
+        """
+        <div class="yera-hero">
+            <h1>Y.E.R.A. AI · ИИ-Ассистент</h1>
+            <p>Спросите на естественном языке о товарах, продажах, остатках или
+            рекомендованных заказах. Ассистент переведёт вопрос в безопасный
+            SELECT к storage.db и ответит по фактам.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if "chat_messages" not in st.session_state:
+        st.session_state.chat_messages = [
+            {
+                "role": "assistant",
+                "content": (
+                    "Здравствуйте! Я Y.E.R.A. AI. Спросите, например: "
+                    "«Какие товары ИЭК с остатком меньше 50?» или "
+                    "«Покажи критические рекомендованные заказы»."
+                ),
+                "dataframe": None,
+                "sql": None,
+            }
+        ]
+
+    col_cfg, col_clear = st.columns([3, 1])
+    with col_cfg:
+        st.selectbox(
+            "Модель OpenAI",
+            ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"],
+            index=0,
+            key="openai_model",
+        )
+    with col_clear:
+        st.write("")
+        st.write("")
+        if st.button("Очистить чат", use_container_width=True):
+            st.session_state.chat_messages = []
+            st.rerun()
+
+    api_key = _get_openai_api_key()
+    if not api_key:
+        st.warning(
+            "Задайте OPENAI_API_KEY в окружении, в secrets или на странице «Настройки»."
+        )
+
+    for msg in st.session_state.chat_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg.get("sql"):
+                with st.expander("SQL-запрос", expanded=False):
+                    st.code(msg["sql"], language="sql")
+            df = msg.get("dataframe")
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
+    prompt = st.chat_input("Вопрос о товарах, продажах, остатках…")
+    if not prompt:
+        return
+
+    st.session_state.chat_messages.append(
+        {"role": "user", "content": prompt, "dataframe": None, "sql": None}
+    )
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    if not api_key:
+        err = (
+            "Нет API-ключа OpenAI. Добавьте его в Настройках или "
+            "переменной окружения OPENAI_API_KEY."
+        )
+        st.session_state.chat_messages.append(
+            {"role": "assistant", "content": err, "dataframe": None, "sql": None}
+        )
+        with st.chat_message("assistant"):
+            st.markdown(err)
+        return
+
+    with st.chat_message("assistant"):
+        with st.spinner("Y.E.R.A. AI анализирует данные…"):
+            try:
+                result = _run_yera_chat_turn(prompt, api_key)
+            except Exception as exc:  # noqa: BLE001
+                result = {
+                    "content": f"Ошибка обращения к OpenAI / БД: {exc}",
+                    "dataframe": None,
+                    "sql": None,
+                }
+
+        st.markdown(result["content"])
+        if result.get("sql"):
+            with st.expander("SQL-запрос", expanded=False):
+                st.code(result["sql"], language="sql")
+        df = result.get("dataframe")
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+    st.session_state.chat_messages.append(
+        {
+            "role": "assistant",
+            "content": result["content"],
+            "dataframe": result.get("dataframe"),
+            "sql": result.get("sql"),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -633,6 +974,8 @@ def main() -> None:
         page_calculation(supplier_id, category)
     elif page == "Заказы":
         page_orders(supplier_id, category)
+    elif page == "ИИ-Ассистент (Чат)":
+        page_chat_assistant()
     else:
         page_settings()
 
