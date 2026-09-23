@@ -31,6 +31,7 @@ from repository import (
     fetch_products,
     fetch_recommended_orders,
     fetch_suppliers,
+    get_connection,
 )
 
 # ---------------------------------------------------------------------------
@@ -372,6 +373,70 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
     orders = orders.copy()
     orders["moq_final_qty"] = [pair[0] for pair in moq_pairs]
     orders["moq_note"] = [pair[1] for pair in moq_pairs]
+
+    # --- Финансовый анализ (unit_cost из products) ---
+    product_ids = orders["product_id"].dropna().astype(int).unique().tolist()
+    costs_df = pd.DataFrame(columns=["product_id", "unit_cost"])
+    if product_ids:
+        placeholders = ",".join("?" * len(product_ids))
+        conn = get_connection()
+        try:
+            costs_df = pd.read_sql_query(
+                f"""
+                SELECT product_id, COALESCE(unit_cost, 0) AS unit_cost
+                FROM products
+                WHERE product_id IN ({placeholders})
+                """,
+                conn,
+                params=product_ids,
+            )
+        finally:
+            conn.close()
+
+    orders = orders.merge(costs_df, on="product_id", how="left")
+    orders["unit_cost"] = orders["unit_cost"].fillna(0.0)
+    # Сумма закупа по количеству после MOQ (если есть), иначе recommended_qty
+    qty_col = "moq_final_qty" if "moq_final_qty" in orders.columns else "recommended_qty"
+    orders["line_cost"] = orders[qty_col].fillna(0) * orders["unit_cost"]
+
+    total_purchase = float(orders["line_cost"].sum())
+    urgent_mask = orders["urgency"].isin(["критическая", "высокая"])
+    urgent_purchase = float(orders.loc[urgent_mask, "line_cost"].sum())
+
+    st.divider()
+    st.markdown("#### Финансовый анализ и прогноз кассового разрыва")
+    budget = st.number_input(
+        "Доступный бюджет закупа, ₸",
+        min_value=0.0,
+        value=2_000_000.0,
+        step=50_000.0,
+        format="%.0f",
+        key="purchase_budget",
+    )
+    cash_gap = max(total_purchase - float(budget), 0.0)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Общая сумма закупа", f"{total_purchase:,.0f} ₸".replace(",", " "))
+    m2.metric(
+        "Из них срочно (крит. + высокая)",
+        f"{urgent_purchase:,.0f} ₸".replace(",", " "),
+    )
+    m3.metric(
+        "Кассовый разрыв",
+        f"{cash_gap:,.0f} ₸".replace(",", " "),
+        delta=None if cash_gap <= 0 else "превышение бюджета",
+        delta_color="inverse",
+    )
+
+    if cash_gap > 0:
+        st.warning(
+            f"Кассовый разрыв **{cash_gap:,.0f} ₸**. "
+            "Рекомендуется в первую очередь закупать только срочные позиции "
+            "(срочность «критическая» и «высокая»), остальное — отложить "
+            "до пополнения бюджета.".replace(",", " ")
+        )
+    else:
+        st.success("Бюджета достаточно для полного рекомендованного закупа.")
 
     st.subheader("Рекомендованные заказы")
     display = orders[

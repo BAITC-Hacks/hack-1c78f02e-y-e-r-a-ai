@@ -150,12 +150,23 @@ def get_connection(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     return conn
 
 
+def migrate_schema(conn: sqlite3.Connection) -> None:
+    """Добавляет недостающие колонки в существующую БД (без поломки данных)."""
+    product_cols = {row[1] for row in conn.execute("PRAGMA table_info(products)")}
+    if "unit_cost" not in product_cols:
+        conn.execute(
+            "ALTER TABLE products ADD COLUMN unit_cost REAL DEFAULT 0"
+        )
+    conn.commit()
+
+
 def init_db(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     """Создаёт файл БД и все таблицы по схеме."""
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = get_connection(path)
     conn.executescript(SCHEMA_SQL)
+    migrate_schema(conn)
     conn.commit()
     return conn
 
@@ -244,38 +255,38 @@ def seed_test_data(
     se_id = supplier_ids["Systeme Electric"]
 
     # --- Товары ---
-    # (code_1c, article, name, unit, category, supplier_id, min_ship, multiplicity, base_monthly)
+    # (code_1c, article, name, unit, category, supplier_id, min_ship, multiplicity, base_monthly, unit_cost_kzt)
     product_defs = [
         # ИЭК
-        ("IEK-0001", "MVA20-1-016-C", "Автоматический выключатель ВА47-29 1P 16А C", "шт", "Автоматика", iek_id, 12, 1, 180),
-        ("IEK-0002", "MVA20-1-025-C", "Автоматический выключатель ВА47-29 1P 25А C", "шт", "Автоматика", iek_id, 12, 1, 140),
-        ("IEK-0003", "MVA20-3-032-C", "Автоматический выключатель ВА47-29 3P 32А C", "шт", "Автоматика", iek_id, 6, 1, 90),
-        ("IEK-0004", "MDV15-2-063-030", "УЗО ВД1-63 2P 63А 30мА", "шт", "УЗО", iek_id, 4, 1, 55),
-        ("IEK-0005", "UKU10-V1-K01", "Корпус ЩРн-П 12 модулей IP41", "шт", "Щиты", iek_id, 1, 1, 35),
-        ("IEK-0006", "UKA10-40-K03", "Корпус ЩРн 36 модулей IP31", "шт", "Щиты", iek_id, 1, 1, 22),
-        ("IEK-0007", "UKP10-3-K01", "Клемма винтовая ЗНИ 2.5 мм²", "шт", "Клеммы", iek_id, 100, 1, 800),
-        ("IEK-0008", "YND10-00-K02", "Наконечник НШвИ 1.5-8", "шт", "Наконечники", iek_id, 100, 1, 1200),
+        ("IEK-0001", "MVA20-1-016-C", "Автоматический выключатель ВА47-29 1P 16А C", "шт", "Автоматика", iek_id, 12, 1, 180, 1850),
+        ("IEK-0002", "MVA20-1-025-C", "Автоматический выключатель ВА47-29 1P 25А C", "шт", "Автоматика", iek_id, 12, 1, 140, 2100),
+        ("IEK-0003", "MVA20-3-032-C", "Автоматический выключатель ВА47-29 3P 32А C", "шт", "Автоматика", iek_id, 6, 1, 90, 5200),
+        ("IEK-0004", "MDV15-2-063-030", "УЗО ВД1-63 2P 63А 30мА", "шт", "УЗО", iek_id, 4, 1, 55, 9800),
+        ("IEK-0005", "UKU10-V1-K01", "Корпус ЩРн-П 12 модулей IP41", "шт", "Щиты", iek_id, 1, 1, 35, 4200),
+        ("IEK-0006", "UKA10-40-K03", "Корпус ЩРн 36 модулей IP31", "шт", "Щиты", iek_id, 1, 1, 22, 8900),
+        ("IEK-0007", "UKP10-3-K01", "Клемма винтовая ЗНИ 2.5 мм²", "шт", "Клеммы", iek_id, 100, 1, 800, 95),
+        ("IEK-0008", "YND10-00-K02", "Наконечник НШвИ 1.5-8", "шт", "Наконечники", iek_id, 100, 1, 1200, 35),
         # Systeme Electric
-        ("SE-0001", "A9F74116", "Автомат iC60N 1P 16A C", "шт", "Автоматика", se_id, 1, 12, 95),
-        ("SE-0002", "A9F74325", "Автомат iC60N 3P 25A C", "шт", "Автоматика", se_id, 1, 6, 48),
-        ("SE-0003", "A9R41263", "УЗО iID 2P 63A 30mA AC", "шт", "УЗО", se_id, 1, 4, 30),
-        ("SE-0004", "A9C20832", "Контактор iCT 25A 2NO 230V", "шт", "Контакторы", se_id, 1, 1, 40),
-        ("SE-0005", "GV2ME08", "Пускатель TeSys GV2ME 2.5-4A", "шт", "Пускатели", se_id, 1, 1, 18),
-        ("SE-0006", "NSX100N", "Автомат Compact NSX100N 3P 100A", "шт", "Силовая защита", se_id, 1, 1, 8),
-        ("SE-0007", "LRE12", "Реле тепловое TeSys LRE 5.5-8A", "шт", "Реле", se_id, 1, 1, 25),
-        ("SE-0008", "ZB5AA3", "Кнопка XB5 зелёная утопленная", "шт", "Кнопки", se_id, 1, 10, 60),
+        ("SE-0001", "A9F74116", "Автомат iC60N 1P 16A C", "шт", "Автоматика", se_id, 1, 12, 95, 6500),
+        ("SE-0002", "A9F74325", "Автомат iC60N 3P 25A C", "шт", "Автоматика", se_id, 1, 6, 48, 18500),
+        ("SE-0003", "A9R41263", "УЗО iID 2P 63A 30mA AC", "шт", "УЗО", se_id, 1, 4, 30, 27500),
+        ("SE-0004", "A9C20832", "Контактор iCT 25A 2NO 230V", "шт", "Контакторы", se_id, 1, 1, 40, 15200),
+        ("SE-0005", "GV2ME08", "Пускатель TeSys GV2ME 2.5-4A", "шт", "Пускатели", se_id, 1, 1, 18, 24800),
+        ("SE-0006", "NSX100N", "Автомат Compact NSX100N 3P 100A", "шт", "Силовая защита", se_id, 1, 1, 8, 125000),
+        ("SE-0007", "LRE12", "Реле тепловое TeSys LRE 5.5-8A", "шт", "Реле", se_id, 1, 1, 25, 11200),
+        ("SE-0008", "ZB5AA3", "Кнопка XB5 зелёная утопленная", "шт", "Кнопки", se_id, 1, 10, 60, 3200),
     ]
 
     product_meta: list[dict] = []
-    for code, article, name, unit, category, sid, min_ship, mult, base in product_defs:
+    for code, article, name, unit, category, sid, min_ship, mult, base, cost in product_defs:
         cur = conn.execute(
             """
             INSERT INTO products (
                 code_1c, supplier_article, name, unit, category,
-                supplier_id, min_ship_qty, multiplicity, is_active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                supplier_id, min_ship_qty, multiplicity, is_active, unit_cost
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
             """,
-            (code, article, name, unit, category, sid, min_ship, mult),
+            (code, article, name, unit, category, sid, min_ship, mult, cost),
         )
         product_meta.append(
             {
@@ -285,6 +296,7 @@ def seed_test_data(
                 "category": category,
                 "supplier_id": sid,
                 "base_monthly": base,
+                "unit_cost": cost,
             }
         )
 
