@@ -4,8 +4,9 @@ Y.E.R.A. AI — Streamlit UI для рекомендованных заказо�
 Запуск:
   streamlit run app.py
 
-Страницы: Дашборд / Остатки и продажи / Расчёт / Заказы /
-ИИ-Ассистент (Чат) / Настройки.
+Навигация (горизонтальные вкладки):
+  Дашборд закупа / Рекомендации / ИИ-Ассистент.
+Настройки API — компактный expander в шапке.
 Расчёт qty — только детерминированный core/, без LLM.
 """
 
@@ -43,7 +44,6 @@ from repository import (
     get_connection,
 )
 
-# Импорт SQL-хелперов для чата (отдельно — понятная ошибка, если модуль устарел)
 try:
     from database import AGENT_SCHEMA_SUMMARY, execute_readonly_query
 except ImportError as _imp_err:  # pragma: no cover
@@ -54,45 +54,226 @@ except ImportError as _imp_err:  # pragma: no cover
     ) from _imp_err
 
 # ---------------------------------------------------------------------------
-# Page config & styles
+# Page config & premium dark theme
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
     page_title="Y.E.R.A. AI · Электрокомплект",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 st.markdown(
     """
 <style>
-    .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-    div[data-testid="stMetric"] {
-        background: linear-gradient(145deg, #0f2744 0%, #163a5f 100%);
-        border: 1px solid #2a5a8a;
-        border-radius: 12px;
-        padding: 12px 16px;
+    /* ——— База: угольно-графитовый фон ——— */
+    .stApp, [data-testid="stAppViewContainer"],
+    [data-testid="stHeader"], [data-testid="stToolbar"] {
+        background-color: #0F172A !important;
+        color: #F8FAFC !important;
     }
-    div[data-testid="stMetric"] label { color: #9ec3e8 !important; }
+    [data-testid="stHeader"] { background: transparent !important; }
+    .block-container {
+        padding-top: 1rem;
+        padding-bottom: 2.5rem;
+        max-width: 1280px;
+    }
+    /* Полностью скрыть sidebar */
+    [data-testid="stSidebar"],
+    [data-testid="stSidebarCollapsedControl"],
+    section[data-testid="stSidebar"] {
+        display: none !important;
+        width: 0 !important;
+        min-width: 0 !important;
+    }
+    /* Текст */
+    h1, h2, h3, h4, p, label, span, .stMarkdown, .stCaption {
+        color: #F8FAFC !important;
+    }
+    .stCaption, [data-testid="stCaptionContainer"] {
+        color: #94A3B8 !important;
+    }
+    /* Верхний бренд-бар */
+    .yera-topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.85rem 1.25rem;
+        margin-bottom: 1rem;
+        border-radius: 12px;
+        background: linear-gradient(135deg, #111827 0%, #1F2937 55%, #0F172A 100%);
+        border: 1px solid rgba(249, 115, 22, 0.35);
+        box-shadow: 0 0 24px rgba(239, 68, 68, 0.12);
+    }
+    .yera-topbar .brand {
+        font-size: 1.35rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        color: #FFF !important;
+    }
+    .yera-topbar .brand span { color: #F97316; }
+    .yera-topbar .tagline {
+        color: #94A3B8 !important;
+        font-size: 0.88rem;
+        margin: 0;
+    }
+    /* Hero */
+    .yera-hero {
+        background: linear-gradient(120deg, #111827 0%, #1F2937 50%, #7C2D12 140%);
+        border-radius: 14px;
+        padding: 1.35rem 1.5rem;
+        color: #F8FAFC;
+        margin-bottom: 1.1rem;
+        border: 1px solid rgba(249, 115, 22, 0.28);
+        box-shadow: 0 0 28px rgba(249, 115, 22, 0.08);
+    }
+    .yera-hero h1 {
+        margin: 0 0 0.35rem 0;
+        font-size: 1.55rem;
+        letter-spacing: 0.02em;
+        color: #FFF !important;
+    }
+    .yera-hero p { margin: 0; color: #CBD5E1 !important; font-size: 0.95rem; }
+    /* KPI-карточки */
+    div[data-testid="stMetric"] {
+        background: #1F2937 !important;
+        border: 1px solid rgba(249, 115, 22, 0.28);
+        border-radius: 12px;
+        padding: 14px 16px;
+        transition: all 0.3s ease-in-out;
+        box-shadow: 0 0 18px rgba(239, 68, 68, 0.1);
+    }
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 10px 28px rgba(249, 115, 22, 0.22);
+        border-color: #F97316;
+    }
+    div[data-testid="stMetric"] label { color: #94A3B8 !important; }
     div[data-testid="stMetric"] [data-testid="stMetricValue"] {
-        color: #f2f7fc !important;
+        color: #FFFFFF !important;
         font-weight: 700;
     }
-    .yera-hero {
-        background: linear-gradient(120deg, #0b1f36 0%, #1a4a7a 55%, #0d9488 100%);
-        border-radius: 16px;
-        padding: 1.4rem 1.6rem;
-        color: #f8fafc;
-        margin-bottom: 1rem;
-        border: 1px solid #2dd4bf33;
+    div[data-testid="stMetric"] [data-testid="stMetricDelta"] {
+        color: #FDBA74 !important;
     }
-    .yera-hero h1 { margin: 0 0 0.35rem 0; font-size: 1.65rem; letter-spacing: 0.02em; }
-    .yera-hero p { margin: 0; opacity: 0.9; font-size: 0.95rem; }
+    /* Dataframes */
+    div[data-testid="stDataFrame"],
+    div[data-testid="stDataFrame"] > div {
+        background: #1F2937 !important;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 10px;
+        box-shadow: 0 0 16px rgba(56, 189, 248, 0.05);
+    }
+    /* Горизонтальные вкладки */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 0.4rem;
+        background: #111827;
+        padding: 0.45rem;
+        border-radius: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        margin-bottom: 0.75rem;
+    }
+    .stTabs [data-baseweb="tab"] {
+        color: #94A3B8 !important;
+        border-radius: 8px !important;
+        padding: 0.55rem 1rem !important;
+        font-weight: 600;
+        background: transparent !important;
+    }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(135deg, #EF4444 0%, #F97316 100%) !important;
+        color: #FFFFFF !important;
+        box-shadow: 0 0 16px rgba(239, 68, 68, 0.35);
+    }
+    /* Кнопки — красно-оранжевый акцент */
+    div[data-testid="stButton"] > button,
+    div[data-testid="stDownloadButton"] > button {
+        background: linear-gradient(135deg, #EF4444 0%, #F97316 100%) !important;
+        color: #FFFFFF !important;
+        border: none !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        transition: all 0.3s ease-in-out !important;
+        box-shadow: 0 4px 14px rgba(239, 68, 68, 0.28);
+    }
+    div[data-testid="stButton"] > button:hover,
+    div[data-testid="stDownloadButton"] > button:hover {
+        filter: brightness(1.12);
+        transform: translateY(-3px);
+        box-shadow: 0 10px 22px rgba(249, 115, 22, 0.35);
+        color: #FFFFFF !important;
+    }
+    div[data-testid="stButton"] > button p,
+    div[data-testid="stDownloadButton"] > button p {
+        color: #FFFFFF !important;
+    }
+    /* Инпуты */
+    .stTextInput input, .stNumberInput input, .stSelectbox [data-baseweb="select"] > div,
+    .stMultiSelect [data-baseweb="select"] > div, .stTextArea textarea {
+        background-color: #1F2937 !important;
+        color: #F8FAFC !important;
+        border-radius: 8px !important;
+        border-color: rgba(148, 163, 184, 0.3) !important;
+    }
+    [data-testid="stChatMessage"] {
+        background: transparent !important;
+        border: none !important;
+        border-radius: 12px;
+        padding: 0.35rem 0.25rem !important;
+    }
+    /* Окно чата: bordered container со скроллом */
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background: #1E293B !important;
+        border: 1px solid rgba(249, 115, 22, 0.32) !important;
+        border-radius: 16px !important;
+        padding: 15px !important;
+        box-shadow: 0 0 24px rgba(56, 189, 248, 0.08);
+    }
+    div[data-testid="stChatMessageContent"] {
+        background: #0F172A !important;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        border-radius: 12px;
+        padding: 12px 14px !important;
+    }
+    /* Пользователь vs ассистент — разные тона пузырей */
+    div[data-testid="stChatMessage"]:has(img[alt="👤"]) [data-testid="stChatMessageContent"],
+    div[data-testid="stChatMessage"]:has([aria-label="👤"]) [data-testid="stChatMessageContent"] {
+        background: #334155 !important;
+        border-color: rgba(249, 115, 22, 0.4);
+    }
+    div[data-testid="stChatMessage"]:has(img[alt="⚡"]) [data-testid="stChatMessageContent"],
+    div[data-testid="stChatMessage"]:has([aria-label="⚡"]) [data-testid="stChatMessageContent"] {
+        background: #0F172A !important;
+        border-color: rgba(56, 189, 248, 0.35);
+    }
+    /* Поле ввода чата у нижнего края */
+    [data-testid="stChatInput"] {
+        background: #1E293B !important;
+        border: 1px solid rgba(249, 115, 22, 0.3) !important;
+        border-radius: 12px !important;
+        padding: 8px !important;
+        margin-top: 0.75rem !important;
+    }
+    [data-testid="stChatInput"] textarea {
+        color: #F8FAFC !important;
+    }
+    .yera-api-ok {
+        color: #86EFAC !important;
+        font-size: 0.85rem;
+        margin: 0.25rem 0 0 0;
+    }
     .urgency-критическая { color: #fecaca; background: #7f1d1d; padding: 2px 8px; border-radius: 6px; }
     .urgency-высокая { color: #ffedd5; background: #9a3412; padding: 2px 8px; border-radius: 6px; }
     .urgency-средняя { color: #fef9c3; background: #854d0e; padding: 2px 8px; border-radius: 6px; }
     .urgency-низкая { color: #dcfce7; background: #166534; padding: 2px 8px; border-radius: 6px; }
+    hr { border-color: rgba(148, 163, 184, 0.2) !important; }
+    div[data-testid="stExpander"] {
+        background: #1F2937;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        border-radius: 10px;
+    }
 </style>
 """,
     unsafe_allow_html=True,
@@ -100,7 +281,7 @@ st.markdown(
 
 
 # ---------------------------------------------------------------------------
-# Cached data loaders (тяжёлые запросы не на каждый rerender)
+# Cached data loaders
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -143,7 +324,6 @@ def _cached_moq_reference(
     supplier_id: int | None = None,
     category: str | None = None,
 ) -> pd.DataFrame:
-    """Справочник min_ship_qty / multiplicity по product_id для MOQ-проверки."""
     products = fetch_products(supplier_id, category)
     if products.empty:
         return pd.DataFrame(columns=["product_id", "min_ship_qty", "multiplicity"])
@@ -160,58 +340,119 @@ def _fmt_int(n: float | int) -> str:
     return f"{int(round(n)):,}".replace(",", " ")
 
 
-URGENCY_COLORS = {
-    "критическая": "#b91c1c",
-    "высокая": "#c2410c",
-    "средняя": "#a16207",
-    "низкая": "#15803d",
-}
-
-
 # ---------------------------------------------------------------------------
-# Sidebar
+# Top bar + filters + API settings (вместо sidebar / вкладки Настройки)
 # ---------------------------------------------------------------------------
 
-def render_sidebar() -> tuple[str, int | None, str | None]:
-    with st.sidebar:
-        st.markdown("### Y.E.R.A. AI")
-        st.caption("Электрокомплект · закуп")
+def _env_openai_key() -> str:
+    """Ключ из системного окружения — главный источник истины."""
+    return (os.getenv("OPENAI_API_KEY") or "").strip()
 
-        page = st.radio(
-            "Раздел",
-            [
-                "Дашборд",
-                "Остатки и продажи",
-                "Расчёт",
-                "Заказы",
-                "ИИ-Ассистент (Чат)",
-                "Настройки",
-            ],
-            label_visibility="collapsed",
-        )
-        st.divider()
 
-        suppliers = _cached_suppliers()
-        supplier_names = ["Все поставщики"] + suppliers["supplier_name"].tolist()
-        chosen = st.selectbox("Поставщик", supplier_names)
-        supplier_id: int | None = None
-        if chosen != "Все поставщики":
-            supplier_id = int(
-                suppliers.loc[suppliers["supplier_name"] == chosen, "supplier_id"].iloc[0]
+def _get_openai_api_key() -> str:
+    """
+    Порядок поиска ключа:
+    1) os.getenv("OPENAI_API_KEY") — приоритет, переживает Ctrl+R
+    2) st.session_state["openai_api_key"] — ручной ввод из expander
+    3) st.secrets
+    """
+    env_key = _env_openai_key()
+    if env_key:
+        return env_key
+
+    session_key = str(st.session_state.get("openai_api_key") or "").strip()
+    if session_key:
+        return session_key
+
+    try:
+        return str(st.secrets.get("OPENAI_API_KEY", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def render_api_settings_panel() -> None:
+    """Компактный expander в шапке: ключ API + служебные действия."""
+    with st.expander("⚙️ Настройки API", expanded=False):
+        env_key = _env_openai_key()
+        if env_key:
+            st.markdown(
+                '<p class="yera-api-ok">✓ OPENAI_API_KEY найден в системном окружении '
+                f"(…{env_key[-4:]}). Ввод не требуется.</p>",
+                unsafe_allow_html=True,
             )
+        else:
+            st.caption(
+                "Ключ не найден в окружении. Задайте OPENAI_API_KEY в системе "
+                "или введите ниже (сохранится до перезапуска Streamlit)."
+            )
+            manual = st.text_input(
+                "API-ключ OpenAI (fallback)",
+                value=st.session_state.get("openai_api_key", ""),
+                type="password",
+                key="openai_api_key_input",
+                placeholder="sk-…",
+            )
+            if manual.strip():
+                st.session_state["openai_api_key"] = manual.strip()
 
-        cats = _cached_categories(supplier_id)
-        cat_options = ["Все категории"] + cats
-        cat_chosen = st.selectbox("Категория", cat_options)
-        category = None if cat_chosen == "Все категории" else cat_chosen
+        st.caption(f"БД: `{DB_PATH}` · существует: {DB_PATH.exists()}")
+        if st.button("Пересоздать тестовую БД", key="reseed_db"):
+            init_db(DB_PATH)
+            stats = seed_test_data(clear=True)
+            st.cache_data.clear()
+            st.success(f"БД обновлена: {stats}")
 
-        st.divider()
-        st.caption(f"БД: `{DB_PATH.name}`")
-        if st.button("Обновить кэш данных", use_container_width=True):
+
+def render_topbar() -> None:
+    col_brand, col_settings = st.columns([4, 1.4])
+    with col_brand:
+        st.markdown(
+            """
+            <div class="yera-topbar">
+                <div>
+                    <div class="brand">Y.E.R.A. <span>AI</span></div>
+                    <p class="tagline">Электрокомплект · премиум-логистика закупа</p>
+                </div>
+                <div class="tagline">storage.db · рекомендованные заказы</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with col_settings:
+        render_api_settings_panel()
+
+
+def render_filters() -> tuple[int | None, str | None]:
+    """Горизонтальные фильтры поставщик / категория (вместо sidebar)."""
+    suppliers = _cached_suppliers()
+    supplier_names = ["Все поставщики"] + suppliers["supplier_name"].tolist()
+
+    f1, f2, f3 = st.columns([2, 2, 1])
+    with f1:
+        chosen = st.selectbox("Поставщик", supplier_names, key="filter_supplier")
+    supplier_id: int | None = None
+    if chosen != "Все поставщики" and not suppliers.empty:
+        supplier_id = int(
+            suppliers.loc[suppliers["supplier_name"] == chosen, "supplier_id"].iloc[0]
+        )
+
+    cats = _cached_categories(supplier_id)
+    with f2:
+        cat_chosen = st.selectbox(
+            "Категория",
+            ["Все категории"] + cats,
+            key="filter_category",
+        )
+    category = None if cat_chosen == "Все категории" else cat_chosen
+
+    with f3:
+        st.write("")
+        st.write("")
+        if st.button("↻ Обновить данные", use_container_width=True, key="refresh_cache"):
             st.cache_data.clear()
             st.rerun()
 
-    return page, supplier_id, category
+    return supplier_id, category
 
 
 # ---------------------------------------------------------------------------
@@ -222,8 +463,8 @@ def page_dashboard(supplier_id: int | None, category: str | None) -> None:
     st.markdown(
         """
         <div class="yera-hero">
-            <h1>Y.E.R.A. AI · Дашборд закупа</h1>
-            <p>Рекомендованные заказы на основе истории продаж, сезонности, stockout и очистки выбросов.
+            <h1>📊 Дашборд закупа</h1>
+            <p>Сводка по остаткам, дефициту и последним рекомендованным заказам.
             Отправка поставщику — только после утверждения менеджером.</p>
         </div>
         """,
@@ -237,43 +478,51 @@ def page_dashboard(supplier_id: int | None, category: str | None) -> None:
     c3.metric("Объём в пути", _fmt_int(metrics["transit_qty"]))
     c4.metric("Черновики заказов", _fmt_int(metrics["draft_orders"]))
 
-    st.subheader("Последний расчёт (топ срочности)")
+    st.markdown("#### Последний расчёт (топ срочности)")
     orders = _cached_orders(None, supplier_id, category, None)
     if orders.empty:
-        st.info("Расчётов ещё нет. Перейдите в раздел «Расчёт» и запустите Y.E.R.A. AI.")
-        return
+        st.info("Расчётов ещё нет. Откройте вкладку «Рекомендации» и запустите Y.E.R.A. AI.")
+    else:
+        preview = orders.head(12)[
+            [
+                "supplier_name",
+                "supplier_article",
+                "name",
+                "recommended_qty",
+                "unit",
+                "urgency",
+                "status",
+                "justification",
+            ]
+        ].rename(
+            columns={
+                "supplier_name": "Поставщик",
+                "supplier_article": "Артикул",
+                "name": "Номенклатура",
+                "recommended_qty": "К заказу",
+                "unit": "Ед.",
+                "urgency": "Срочность",
+                "status": "Статус",
+                "justification": "Обоснование",
+            }
+        )
+        st.dataframe(preview, use_container_width=True, hide_index=True, height=360)
 
-    preview = orders.head(12)[
-        [
-            "supplier_name",
-            "supplier_article",
-            "name",
-            "recommended_qty",
-            "unit",
-            "urgency",
-            "status",
-            "justification",
-        ]
-    ].rename(
-        columns={
-            "supplier_name": "Поставщик",
-            "supplier_article": "Артикул",
-            "name": "Номенклатура",
-            "recommended_qty": "К заказу",
-            "unit": "Ед.",
-            "urgency": "Срочность",
-            "status": "Статус",
-            "justification": "Обоснование",
-        }
-    )
-    st.dataframe(preview, use_container_width=True, hide_index=True, height=360)
+    st.markdown("---")
+    page_stock_sales(supplier_id, category)
 
 
 def page_stock_sales(supplier_id: int | None, category: str | None) -> None:
-    st.header("Остатки и история продаж")
-    tab_stock, tab_sales = st.tabs(["Текущие остатки", "Помесячные продажи"])
+    st.markdown("#### Остатки и история продаж")
+    mode = st.radio(
+        "Данные",
+        ["Текущие остатки", "Помесячные продажи"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="dash_stock_mode",
+    )
 
-    with tab_stock:
+    if mode == "Текущие остатки":
         stock = _cached_stock(supplier_id, category)
         if stock.empty:
             st.warning("Нет данных по остаткам для выбранных фильтров.")
@@ -309,13 +558,12 @@ def page_stock_sales(supplier_id: int | None, category: str | None) -> None:
                 view,
                 use_container_width=True,
                 hide_index=True,
-                height=480,
+                height=420,
                 column_config={
                     "Остаток": st.column_config.NumberColumn(format="%.0f"),
                 },
             )
-
-    with tab_sales:
+    else:
         sales = _cached_sales_history(supplier_id, category)
         if sales.empty:
             st.warning("Нет истории продаж.")
@@ -331,7 +579,7 @@ def page_stock_sales(supplier_id: int | None, category: str | None) -> None:
                 aggfunc="sum",
             ).reset_index()
             pivot.columns.name = None
-            st.dataframe(pivot, use_container_width=True, hide_index=True, height=480)
+            st.dataframe(pivot, use_container_width=True, hide_index=True, height=420)
 
             chart_src = (
                 sales.groupby("period", as_index=False)["qty_sold"].sum().sort_values("period")
@@ -341,22 +589,27 @@ def page_stock_sales(supplier_id: int | None, category: str | None) -> None:
 
 
 def page_calculation(supplier_id: int | None, category: str | None) -> None:
-    st.header("Интеллектуальный расчёт пополнения")
     st.markdown(
-        "Алгоритм: **базовая потребность** → **сезонность и тренд** → "
-        "**компенсация stockout** → **исключение выбросов** (`detect_outliers`) → "
-        "вычет остатка и товара в пути. Количество считает Python, не LLM."
+        """
+        <div class="yera-hero">
+            <h1>📦 Рекомендации к заказу</h1>
+            <p>Базовая потребность → сезонность и тренд → stockout → выбросы →
+            вычет остатка и товара в пути. Количество считает Python, не LLM.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    col_a, col_b = st.columns([2, 1])
+    _col_a, col_b = st.columns([2, 1])
     with col_b:
         safety_days = st.slider("Страховой запас, дней", 7, 45, 14, 1)
 
     st.write("")
     run_clicked = st.button(
-        "Запустить интеллектуальный расчет пополнения Y.E.R.A. AI",
+        "▶ Запустить интеллектуальный расчет пополнения Y.E.R.A. AI",
         type="primary",
         use_container_width=True,
+        key="run_yera_calc",
     )
 
     if run_clicked:
@@ -375,7 +628,6 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
         )
 
     result = st.session_state.get("last_run")
-    orders = pd.DataFrame()
     if result and result.get("run_id"):
         orders = _cached_orders(result["run_id"], supplier_id, category, None)
     else:
@@ -383,9 +635,9 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
 
     if orders.empty:
         st.info("Нажмите кнопку выше, чтобы сформировать рекомендованные заказы.")
+        page_orders(supplier_id, category)
         return
 
-    # MOQ-проверка: округление под мин. партию и кратность поставщика
     moq_ref = _cached_moq_reference(supplier_id, category)
     orders = orders.merge(moq_ref, on="product_id", how="left")
     moq_pairs = [
@@ -400,7 +652,6 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
     orders["moq_final_qty"] = [pair[0] for pair in moq_pairs]
     orders["moq_note"] = [pair[1] for pair in moq_pairs]
 
-    # --- Финансовый анализ (unit_cost из products) ---
     product_ids = orders["product_id"].dropna().astype(int).unique().tolist()
     costs_df = pd.DataFrame(columns=["product_id", "unit_cost"])
     if product_ids:
@@ -421,7 +672,6 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
 
     orders = orders.merge(costs_df, on="product_id", how="left")
     orders["unit_cost"] = orders["unit_cost"].fillna(0.0)
-    # Сумма закупа по количеству после MOQ (если есть), иначе recommended_qty
     qty_col = "moq_final_qty" if "moq_final_qty" in orders.columns else "recommended_qty"
     orders["line_cost"] = orders[qty_col].fillna(0) * orders["unit_cost"]
 
@@ -429,7 +679,7 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
     urgent_mask = orders["urgency"].isin(["критическая", "высокая"])
     urgent_purchase = float(orders.loc[urgent_mask, "line_cost"].sum())
 
-    st.divider()
+    st.markdown("---")
     st.markdown("#### Финансовый анализ и прогноз кассового разрыва")
     budget = st.number_input(
         "Доступный бюджет закупа, ₸",
@@ -464,7 +714,7 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
     else:
         st.success("Бюджета достаточно для полного рекомендованного закупа.")
 
-    st.subheader("Рекомендованные заказы")
+    st.markdown("#### Рекомендованные заказы")
     display = orders[
         [
             "id",
@@ -525,10 +775,9 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
         key="download_calc_orders_csv",
     )
 
-    # Утверждение прямо со страницы расчёта
     drafts = orders[orders["status"] == "draft"]
     if not drafts.empty:
-        st.divider()
+        st.markdown("---")
         st.markdown("#### Утверждение менеджером")
         manager = st.text_input(
             "ФИО / логин утверждающего",
@@ -560,13 +809,17 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
                 )
                 st.rerun()
 
+    st.markdown("---")
+    page_orders(supplier_id, category)
+
 
 def page_orders(supplier_id: int | None, category: str | None) -> None:
-    st.header("Список заказов по поставщикам")
+    st.markdown("#### Заказы по поставщикам")
     status_filter = st.selectbox(
         "Статус",
         ["Все", "draft", "approved", "rejected", "sent"],
         index=0,
+        key="orders_status_filter",
     )
     status = None if status_filter == "Все" else status_filter
     orders = _cached_orders(None, supplier_id, category, status)
@@ -576,7 +829,7 @@ def page_orders(supplier_id: int | None, category: str | None) -> None:
         return
 
     for supplier_name, grp in orders.groupby("supplier_name", sort=True):
-        with st.expander(f"{supplier_name} · {len(grp)} поз.", expanded=True):
+        with st.expander(f"{supplier_name} · {len(grp)} поз.", expanded=False):
             view = grp[
                 [
                     "id",
@@ -625,51 +878,9 @@ def page_orders(supplier_id: int | None, category: str | None) -> None:
                         st.success(f"{supplier_name}: утверждено {n} позиций.")
                         st.rerun()
 
-def page_settings() -> None:
-    st.header("Настройки")
-    st.write(f"**Путь к БД:** `{DB_PATH}`")
-    st.write(f"**Файл существует:** {DB_PATH.exists()}")
-
-    st.subheader("OpenAI API")
-    current_key = st.session_state.get("openai_api_key") or os.environ.get(
-        "OPENAI_API_KEY", ""
-    )
-    new_key = st.text_input(
-        "API-ключ OpenAI",
-        value=current_key,
-        type="password",
-        help="Или задайте переменную окружения OPENAI_API_KEY. Ключ хранится в session_state.",
-    )
-    if new_key != current_key:
-        st.session_state["openai_api_key"] = new_key
-    st.caption("Ключ нужен для страницы «ИИ-Ассистент (Чат)».")
-
-    st.subheader("Демо-данные")
-    st.caption(
-        "Пересоздаёт storage.db с тестовыми товарами ИЭК / Systeme Electric "
-        "и аномальными крупными заказами для проверки выбросов."
-    )
-    if st.button("Пересоздать тестовую БД", type="secondary"):
-        init_db(DB_PATH)
-        stats = seed_test_data(clear=True)
-        st.cache_data.clear()
-        st.success(f"БД обновлена: {stats}")
-
-    st.subheader("Методология (кратко)")
-    st.markdown(
-        """
-1. **Базовая потребность** — среднее месячных отгрузок без `is_outlier`.
-2. **Сезонность** — `month_value / avg` из `seasonality_reference` × тренд 3/3 мес.
-3. **Stockout** — `avg_daily × days_out` добавляется к потребности.
-4. **Выбросы** — `detect_outliers()` (IQR + доля клиента в месяце), флаг в БД.
-5. **Итог** — спрос на горизонт lead time + safety − остаток − в пути, округление по MOQ/кратности.
-6. Заказ **не отправляется** автоматически: только `draft` → `approved` человеком.
-        """
-    )
-
 
 # ---------------------------------------------------------------------------
-# ИИ-Ассистент (Чат) — NL → безопасный SELECT → ответ
+# ИИ-Ассистент (Чат)
 # ---------------------------------------------------------------------------
 
 AGENT_PROMPT_PATH = ROOT / "agent_prompt.txt"
@@ -681,7 +892,7 @@ CHAT_SQL_INSTRUCTIONS = """
 
 Верни СТРОГО один JSON-объект без markdown-ограждений:
 {
-  "sql": "SELECT …",   // или null, если данные из БД не нужны
+  "sql": "SELECT …",
   "reason": "кратко, зачем этот запрос"
 }
 
@@ -705,22 +916,7 @@ def _load_agent_system_prompt() -> str:
     return f"{base}\n\n{CHAT_SQL_INSTRUCTIONS}".strip()
 
 
-def _get_openai_api_key() -> str:
-    key = (
-        st.session_state.get("openai_api_key")
-        or os.environ.get("OPENAI_API_KEY")
-        or ""
-    )
-    if not key:
-        try:
-            key = st.secrets.get("OPENAI_API_KEY", "")  # type: ignore[attr-defined]
-        except Exception:
-            key = ""
-    return str(key or "").strip()
-
-
 def _extract_json_object(text: str) -> dict:
-    """Достаёт первый JSON-объект из ответа модели."""
     text = (text or "").strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -754,17 +950,10 @@ def _openai_chat(
 def _dataframe_for_llm(df: pd.DataFrame, max_rows: int = 40) -> str:
     if df.empty:
         return "(пусто: 0 строк)"
-    preview = df.head(max_rows)
-    return preview.to_csv(index=False)
+    return df.head(max_rows).to_csv(index=False)
 
 
 def _run_yera_chat_turn(user_text: str, api_key: str) -> dict:
-    """
-    Один ход ассистента:
-    1) NL → JSON {sql, reason}
-    2) execute_readonly_query
-    3) форматированный ответ менеджеру (+ таблица при наличии строк)
-    """
     system = _load_agent_system_prompt()
     plan_raw = _openai_chat(
         [
@@ -789,7 +978,6 @@ def _run_yera_chat_turn(user_text: str, api_key: str) -> dict:
         sql = str(raw_sql).strip() if raw_sql else None
         reason = str(plan.get("reason") or "")
     except (json.JSONDecodeError, TypeError, ValueError):
-        # Модель вернула не JSON — попробуем вытащить SELECT напрямую
         m = re.search(
             r"(?is)\b(WITH\b[\s\S]+SELECT\b[\s\S]+|SELECT\b[\s\S]+)",
             plan_raw,
@@ -809,7 +997,7 @@ def _run_yera_chat_turn(user_text: str, api_key: str) -> dict:
     if sql:
         try:
             df = execute_readonly_query(sql, limit=100)
-        except Exception as exc:  # noqa: BLE001 — показываем менеджеру
+        except Exception as exc:  # noqa: BLE001
             sql_error = str(exc)
 
     if sql_error:
@@ -819,11 +1007,8 @@ def _run_yera_chat_turn(user_text: str, api_key: str) -> dict:
                 {
                     "role": "user",
                     "content": (
-                        f"Вопрос: {user_text}\n"
-                        f"SQL: {sql}\n"
-                        f"Ошибка выполнения: {sql_error}\n"
-                        "Объясни менеджеру кратко на русском, без повторного SQL, "
-                        "что пошло не так и как переформулировать вопрос."
+                        f"Вопрос: {user_text}\nSQL: {sql}\nОшибка: {sql_error}\n"
+                        "Объясни менеджеру кратко на русском, что пошло не так."
                     ),
                 },
             ],
@@ -842,9 +1027,8 @@ def _run_yera_chat_turn(user_text: str, api_key: str) -> dict:
                     f"Зачем SQL: {reason or '—'}\n"
                     f"SQL:\n{sql or 'не использовался'}\n\n"
                     f"Результат из storage.db:\n{data_block}\n\n"
-                    "Ответь по-русски кратко и по делу. Ссылайся на цифры из результата. "
-                    "Не придумывай значения, которых нет в таблице. "
-                    "Не предлагай автоматически отправить заказ поставщику."
+                    "Ответь по-русски кратко. Ссылайся на цифры из результата. "
+                    "Не придумывай значения. Не предлагай автоотправку заказа."
                 ),
             },
         ],
@@ -860,14 +1044,30 @@ def _run_yera_chat_turn(user_text: str, api_key: str) -> dict:
     }
 
 
+def _render_chat_bubble(msg: dict) -> None:
+    """Одно сообщение с разными аватарками user / Y.E.R.A."""
+    role = msg.get("role", "assistant")
+    if role == "user":
+        avatar = "👤"
+    else:
+        avatar = "⚡"
+    with st.chat_message(role, avatar=avatar):
+        st.markdown(msg.get("content") or "")
+        if msg.get("sql"):
+            with st.expander("SQL-запрос", expanded=False):
+                st.code(msg["sql"], language="sql")
+        df = msg.get("dataframe")
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+
 def page_chat_assistant() -> None:
     st.markdown(
         """
         <div class="yera-hero">
-            <h1>Y.E.R.A. AI · ИИ-Ассистент</h1>
-            <p>Спросите на естественном языке о товарах, продажах, остатках или
-            рекомендованных заказах. Ассистент переведёт вопрос в безопасный
-            SELECT к storage.db и ответит по фактам.</p>
+            <h1>💬 ИИ-Ассистент Y.E.R.A.</h1>
+            <p>Вопросы о товарах, продажах и заказах на естественном языке.
+            Ассистент переводит их в безопасный SELECT к storage.db.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -878,7 +1078,7 @@ def page_chat_assistant() -> None:
             {
                 "role": "assistant",
                 "content": (
-                    "Здравствуйте! Я Y.E.R.A. AI. Спросите, например: "
+                    "Здравствуйте! Я **Y.E.R.A. AI**. Спросите, например: "
                     "«Какие товары ИЭК с остатком меньше 50?» или "
                     "«Покажи критические рекомендованные заказы»."
                 ),
@@ -898,66 +1098,67 @@ def page_chat_assistant() -> None:
     with col_clear:
         st.write("")
         st.write("")
-        if st.button("Очистить чат", use_container_width=True):
+        if st.button("Очистить чат", use_container_width=True, key="clear_chat"):
             st.session_state.chat_messages = []
             st.rerun()
 
     api_key = _get_openai_api_key()
+    # Жёлтое предупреждение — ТОЛЬКО если ключа нет нигде (env / session / secrets)
     if not api_key:
         st.warning(
-            "Задайте OPENAI_API_KEY в окружении, в secrets или на странице «Настройки»."
+            "OPENAI_API_KEY не найден. Задайте переменную окружения "
+            "или откройте «⚙️ Настройки API» в шапке."
         )
 
-    for msg in st.session_state.chat_messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if msg.get("sql"):
-                with st.expander("SQL-запрос", expanded=False):
-                    st.code(msg["sql"], language="sql")
-            df = msg.get("dataframe")
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                st.dataframe(df, use_container_width=True, hide_index=True)
+    # Фиксированное окно истории (как в мессенджере)
+    try:
+        chat_box = st.container(height=480, border=True)
+    except TypeError:
+        chat_box = st.container(border=True)
 
-    prompt = st.chat_input("Вопрос о товарах, продажах, остатках…")
+    with chat_box:
+        st.markdown(
+            """
+            <div style="background:#1E293B;padding:15px;border-radius:12px;margin:-0.5rem;">
+            <p style="color:#94A3B8;font-size:0.8rem;margin:0 0 0.75rem 0;">
+            Y.E.R.A. AI · диалог с базой storage.db
+            </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        for msg in st.session_state.chat_messages:
+            _render_chat_bubble(msg)
+
+    # Поле ввода прижато к низу (Streamlit pin) — сразу под окном истории
+    prompt = st.chat_input("Напишите вопрос о товарах, продажах, остатках…")
     if not prompt:
         return
 
     st.session_state.chat_messages.append(
         {"role": "user", "content": prompt, "dataframe": None, "sql": None}
     )
-    with st.chat_message("user"):
-        st.markdown(prompt)
 
     if not api_key:
         err = (
-            "Нет API-ключа OpenAI. Добавьте его в Настройках или "
-            "переменной окружения OPENAI_API_KEY."
+            "Нет API-ключа OpenAI. Задайте `OPENAI_API_KEY` в окружении "
+            "или в «⚙️ Настройки API»."
         )
         st.session_state.chat_messages.append(
             {"role": "assistant", "content": err, "dataframe": None, "sql": None}
         )
-        with st.chat_message("assistant"):
-            st.markdown(err)
+        st.rerun()
         return
 
-    with st.chat_message("assistant"):
-        with st.spinner("Y.E.R.A. AI анализирует данные…"):
-            try:
-                result = _run_yera_chat_turn(prompt, api_key)
-            except Exception as exc:  # noqa: BLE001
-                result = {
-                    "content": f"Ошибка обращения к OpenAI / БД: {exc}",
-                    "dataframe": None,
-                    "sql": None,
-                }
-
-        st.markdown(result["content"])
-        if result.get("sql"):
-            with st.expander("SQL-запрос", expanded=False):
-                st.code(result["sql"], language="sql")
-        df = result.get("dataframe")
-        if isinstance(df, pd.DataFrame) and not df.empty:
-            st.dataframe(df, use_container_width=True, hide_index=True)
+    with st.spinner("Y.E.R.A. AI анализирует данные…"):
+        try:
+            result = _run_yera_chat_turn(prompt, api_key)
+        except Exception as exc:  # noqa: BLE001
+            result = {
+                "content": f"Ошибка обращения к OpenAI / БД: {exc}",
+                "dataframe": None,
+                "sql": None,
+            }
 
     st.session_state.chat_messages.append(
         {
@@ -967,28 +1168,32 @@ def page_chat_assistant() -> None:
             "sql": result.get("sql"),
         }
     )
+    st.rerun()
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Main — горизонтальные вкладки (без «Настройки»)
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     _ensure_db()
-    page, supplier_id, category = render_sidebar()
+    render_topbar()
+    supplier_id, category = render_filters()
 
-    if page == "Дашборд":
+    tab_dash, tab_reco, tab_chat = st.tabs(
+        [
+            "📊 Дашборд закупа",
+            "📦 Рекомендации",
+            "💬 ИИ-Ассистент",
+        ]
+    )
+
+    with tab_dash:
         page_dashboard(supplier_id, category)
-    elif page == "Остатки и продажи":
-        page_stock_sales(supplier_id, category)
-    elif page == "Расчёт":
+    with tab_reco:
         page_calculation(supplier_id, category)
-    elif page == "Заказы":
-        page_orders(supplier_id, category)
-    elif page == "ИИ-Ассистент (Чат)":
+    with tab_chat:
         page_chat_assistant()
-    else:
-        page_settings()
 
 
 if __name__ == "__main__":
