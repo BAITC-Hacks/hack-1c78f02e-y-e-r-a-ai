@@ -513,6 +513,18 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
         },
     )
 
+    csv_bytes = display.to_csv(index=False, sep=";").encode("utf-8-sig")
+    st.download_button(
+        label="📥 Скачать отчет закупа в CSV",
+        data=csv_bytes,
+        file_name="yera_recommended_orders.csv",
+        mime="text/csv",
+        type="primary",
+        use_container_width=True,
+        help="UTF-8 с BOM — корректно открывается в Microsoft Excel",
+        key="download_calc_orders_csv",
+    )
+
     # Утверждение прямо со страницы расчёта
     drafts = orders[orders["status"] == "draft"]
     if not drafts.empty:
@@ -612,7 +624,6 @@ def page_orders(supplier_id: int | None, category: str | None) -> None:
                         st.cache_data.clear()
                         st.success(f"{supplier_name}: утверждено {n} позиций.")
                         st.rerun()
-
 
 def page_settings() -> None:
     st.header("Настройки")
