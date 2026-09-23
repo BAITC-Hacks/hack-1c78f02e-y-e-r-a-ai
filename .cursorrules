@@ -1,0 +1,192 @@
+# .cursorrules — HackAlem AI · Трек "Логистика" · Кейс "Электрокомплект"
+# Проект: автоматический расчёт заказов поставщикам для пополнения склада
+# Стек: Python 3.11+, Streamlit, SQLite, OpenAI API
+
+## 0. Контекст задачи (не менять смысл без запроса пользователя)
+Сервис на основе истории продаж, сезонности, остатков, товаров в пути и категорий
+формирует РЕКОМЕНДОВАННЫЕ (не автоматические!) заказы поставщикам, и:
+1) считает базовую потребность по каждому артикулу с учётом ВСЕХ источников данных;
+2) учитывает сезонность и устойчивый рост спроса (не просто среднее по истории);
+3) компенсирует периоды stockout (когда товара не было — спрос занижен);
+4) находит и ИСКЛЮЧАЕТ разовые крупные заказы/продажи одному клиенту из расчёта
+   регулярной потребности (но не выбрасывает их из истории целиком — только из
+   базы для regular demand);
+5) выдаёт список по поставщикам с ОБОСНОВАНИЕМ по каждой позиции.
+
+Нельзя автоматически отправлять заказ поставщику без подтверждения человека.
+Нельзя использовать неанонимизированные данные о клиентах в расчётах.
+
+## 1. Схема базы данных SQLite (источник истины — не выдумывай новые поля/таблицы)
+
+```sql
+PRAGMA foreign_keys = ON;
+
+-- Поставщики (IEK, Systeme Electric, и т.д. — расширяемо)
+CREATE TABLE suppliers (
+    supplier_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier_name   TEXT NOT NULL UNIQUE,       -- 'ИЭК', 'Systeme Electric'
+    lead_time_days  INTEGER,                    -- средний срок поставки, если известен
+    created_at      TEXT DEFAULT (datetime('now'))
+);
+
+-- Товары / номенклатура (справочник, объединяет данные из MOQ + остальных файлов)
+CREATE TABLE products (
+    product_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    code_1c          TEXT NOT NULL UNIQUE,       -- 'Код 1с' / 'Номенклатура.Код' — ключ связи между всеми файлами
+    supplier_article  TEXT,                      -- 'Артикул поставщика' / 'Артикул'
+    name             TEXT NOT NULL,              -- 'Номенклатура' / 'Наименование'
+    unit             TEXT,                       -- 'Ед.' / 'Ед.изм' (шт, м, ...)
+    category         TEXT,                       -- 'Категория 2026' (если есть в выгрузке)
+    supplier_id      INTEGER REFERENCES suppliers(supplier_id),
+    min_ship_qty     INTEGER DEFAULT 1,          -- 'Мин. разр. к отгр.' (IEK MOQ)
+    multiplicity     INTEGER DEFAULT 1,          -- 'Кратность' (SE MOQ) — партия кратна этому числу
+    is_active        INTEGER DEFAULT 1,
+    created_at       TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_products_supplier ON products(supplier_id);
+
+-- Сырая история продаж/отгрузок — из "Динамика продаж_*.xlsx"
+-- Количество отрицательное = отгрузка клиенту (расходная накладная)
+CREATE TABLE sales_transactions (
+    transaction_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    sale_date        TEXT NOT NULL,              -- 'Дата' -> ISO 'YYYY-MM-DD HH:MM:SS'
+    doc_number       TEXT,                        -- 'Номер'
+    doc_name         TEXT,                        -- 'Документ'
+    product_id       INTEGER NOT NULL REFERENCES products(product_id),
+    unit             TEXT,
+    warehouse        TEXT,                        -- 'Склад'
+    quantity         REAL NOT NULL,               -- 'Количество' (signed)
+    client_hash       TEXT,                        -- ОБЕЗЛИЧЕННЫЙ id клиента (sha256), NULL если не выдано
+    is_outlier        INTEGER DEFAULT 0,           -- флаг разового крупного заказа (ставится алгоритмом, не вручную)
+    outlier_reason     TEXT,                        -- почему помечен как выброс
+    imported_at        TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_sales_product_date ON sales_transactions(product_id, sale_date);
+CREATE INDEX idx_sales_outlier ON sales_transactions(is_outlier);
+
+-- Помесячные остатки — из "Ежемесячные остатки *.xlsx" (широкая таблица -> длинная/normalized)
+CREATE TABLE monthly_stock (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id   INTEGER NOT NULL REFERENCES products(product_id),
+    warehouse    TEXT,
+    year         INTEGER NOT NULL,
+    month        INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+    stock_qty    REAL,                            -- 'нач. остаток' на данный месяц
+    UNIQUE(product_id, warehouse, year, month)
+);
+CREATE INDEX idx_stock_product_period ON monthly_stock(product_id, year, month);
+
+-- Помесячные продажи в кол-ве — из "Ежемесячные продажи в количественном выражении *.xlsx"
+-- (агрегат, для быстрых расчётов сезонности/тренда без пересчёта из sales_transactions)
+CREATE TABLE monthly_sales (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id   INTEGER NOT NULL REFERENCES products(product_id),
+    year         INTEGER NOT NULL,
+    month        INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+    qty_sold     REAL,
+    UNIQUE(product_id, year, month)
+);
+CREATE INDEX idx_msales_product_period ON monthly_sales(product_id, year, month);
+
+-- Периоды отсутствия товара (stockout) — ВЫЧИСЛЯЕТСЯ алгоритмом из monthly_stock
+-- (stock_qty <= 0 при qty_sold в предыдущие периоды > 0), не приходит готовым файлом
+CREATE TABLE stockout_periods (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id     INTEGER NOT NULL REFERENCES products(product_id),
+    warehouse      TEXT,
+    start_date     TEXT NOT NULL,
+    end_date       TEXT,                          -- NULL = ещё продолжается
+    days_out       INTEGER,
+    detection_method TEXT,                        -- как определили (например 'stock=0 for N days')
+    created_at     TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_stockout_product ON stockout_periods(product_id);
+
+-- Товар в пути — из "Путь *.xlsx" / "Товар в пути_*.xlsx"
+-- В исходнике каждая колонка = отдельный заказ (номер+дата в заголовке) -> нормализуем в строки
+CREATE TABLE transit_orders (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id         INTEGER NOT NULL REFERENCES products(product_id),
+    po_number          TEXT,                       -- например 'УТ-8231'
+    po_date            TEXT,                        -- дата заказа поставщику
+    expected_arrival   TEXT,                        -- 'поступление до DD.MM.YYYY'
+    quantity           REAL NOT NULL,
+    created_at         TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_transit_product ON transit_orders(product_id);
+
+-- Сезонность на уровне компании/категории — из "Сезонность *.xlsx" (год x 12 месяцев, сумма продаж)
+-- Используется для расчёта seasonal_index = month_value / avg_month_value_that_year
+CREATE TABLE seasonality_reference (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier_id  INTEGER REFERENCES suppliers(supplier_id),
+    category     TEXT,                             -- NULL = вся компания/поставщик целиком
+    year         INTEGER NOT NULL,
+    month        INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
+    total_value  REAL NOT NULL,                     -- сумма продаж (сумма/выручка) за месяц
+    UNIQUE(supplier_id, category, year, month)
+);
+
+-- Итоговый результат расчёта — то, что видит менеджер закупа и экспортирует
+CREATE TABLE recommended_orders (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id              TEXT NOT NULL,               -- id запуска расчёта (группировка одного прогона)
+    product_id          INTEGER NOT NULL REFERENCES products(product_id),
+    supplier_id         INTEGER NOT NULL REFERENCES suppliers(supplier_id),
+    base_demand         REAL,                        -- потребность до корректировок
+    seasonality_adj      REAL,                        -- множитель/добавка за сезонность
+    stockout_adj          REAL,                        -- добавка за упущенный спрос
+    outlier_excluded_qty  REAL DEFAULT 0,               -- сколько исключено как разовый всплеск
+    current_stock        REAL,
+    in_transit_qty        REAL,
+    recommended_qty       REAL NOT NULL,
+    urgency              TEXT CHECK (urgency IN ('низкая','средняя','высокая','критическая')),
+    justification         TEXT NOT NULL,               -- человекочитаемое обоснование (обязательно по ТЗ!)
+    status                TEXT DEFAULT 'draft' CHECK (status IN ('draft','approved','rejected','sent')),
+    created_at            TEXT DEFAULT (datetime('now')),
+    approved_by            TEXT,                        -- кто подтвердил (человек!) — заказ никогда не уходит без этого
+    approved_at            TEXT
+);
+CREATE INDEX idx_reco_run ON recommended_orders(run_id);
+CREATE INDEX idx_reco_supplier ON recommended_orders(supplier_id);
+```
+
+## 2. Жёсткие правила разработки для ИИ в Cursor
+
+1. **НЕ придумывай колонки.** Работай ТОЛЬКО с полями, перечисленными в схеме выше.
+   Если для новой фичи нужна новая колонка — сначала предложи миграцию `ALTER TABLE`,
+   не меняй существующие таблицы молча.
+2. **Парсинг Excel = отдельный ETL-модуль** (`etl/`), не смешивать с бизнес-логикой
+   расчёта (`core/`) и не смешивать с UI (`app/`). Каждый Excel-файл — свой parser-класс.
+3. **Широкие таблицы (помесячные остатки/продажи) обязательно "разворачивай"** в
+   long-формат (product_id, year, month, value) при импорте — никогда не храни и не
+   обрабатывай их как "wide" pandas DataFrame в бизнес-логике.
+4. **Обезличивание — обязательно на этапе импорта**, а не "потом". Если в исходных
+   данных есть client_id — сразу хэшируй (`hashlib.sha256`), исходный ID никогда не
+   попадает в БД и не логируется.
+5. **Все расчётные функции в `core/` должны быть чистыми и тестируемыми**:
+   вход — DataFrame/dict, выход — DataFrame/dict, без прямых обращений к БД внутри.
+   БД-слой — только в `repository/`.
+6. **Каждая цифра в `recommended_orders.justification` должна быть трассируема**
+   до конкретных строк в БД (это прямое требование ТЗ п.7.5 "объяснимость расчёта").
+   Никогда не пиши обоснование как свободный текст от LLM без ссылки на реальные
+   цифры (продажи, сезонный коэффициент, дни stockout, объём в пути).
+7. **Устойчивость к выбросам — отдельная явная функция** `detect_outliers()`,
+   которая помечает `sales_transactions.is_outlier`, а НЕ просто фильтрует данные
+   молча внутри расчёта спроса. Это должно быть проверяемо и логируемо
+   (ТЗ п.7.4: "искусственно добавленный разовый крупный заказ не должен
+   существенно влиять на регулярную потребность").
+8. **Никогда не пиши код, который отправляет заказ поставщику автоматически**
+   (email/API поставщика и т.п.) — только статус `draft`→`approved` человеком.
+9. **Streamlit UI: разделяй страницы** — Дашборд / Расчёт / Список заказов по
+   поставщикам / Настройки. Тяжёлые расчёты не гонять на каждый rerender —
+   кэшировать через `st.cache_data`.
+10. **OpenAI API используется ТОЛЬКО** для (а) генерации читаемого текста
+    обоснования из уже посчитанных цифр, (б) чат-объяснений менеджеру по запросу.
+    ЗАПРЕЩЕНО поручать LLM сам расчёт количества — это делает детерминированный
+    Python-код в `core/`, иначе результат не воспроизводим и не проходит проверку по ТЗ.
+11. Перед любым PR/коммитом — обнови README: методология расчёта, алгоритм
+    исключения выбросов, инструкция запуска (это явное требование ТЗ п.10).
+12. Если не уверен, что значит поле в Excel (например `!!!` в наименовании товара,
+    или пустая ячейка в помесячных остатках) — спроси пользователя, не додумывай
+    бизнес-смысл сам.
