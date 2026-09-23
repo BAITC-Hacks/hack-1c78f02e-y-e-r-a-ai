@@ -21,13 +21,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.pipeline import run_replenishment_calculation
-from database import DB_PATH, init_db, seed_test_data
+from database import DB_PATH, apply_moq_rounding, init_db, seed_test_data
 from repository import (
     approve_orders,
     fetch_categories,
     fetch_current_stock,
     fetch_dashboard_metrics,
     fetch_monthly_sales_history,
+    fetch_products,
     fetch_recommended_orders,
     fetch_suppliers,
 )
@@ -115,6 +116,18 @@ def _cached_orders(
     status: str | None,
 ) -> pd.DataFrame:
     return fetch_recommended_orders(run_id, supplier_id, category, status)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_moq_reference(
+    supplier_id: int | None = None,
+    category: str | None = None,
+) -> pd.DataFrame:
+    """Справочник min_ship_qty / multiplicity по product_id для MOQ-проверки."""
+    products = fetch_products(supplier_id, category)
+    if products.empty:
+        return pd.DataFrame(columns=["product_id", "min_ship_qty", "multiplicity"])
+    return products[["product_id", "min_ship_qty", "multiplicity"]].copy()
 
 
 def _ensure_db() -> None:
@@ -345,6 +358,21 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
         st.info("Нажмите кнопку выше, чтобы сформировать рекомендованные заказы.")
         return
 
+    # MOQ-проверка: округление под мин. партию и кратность поставщика
+    moq_ref = _cached_moq_reference(supplier_id, category)
+    orders = orders.merge(moq_ref, on="product_id", how="left")
+    moq_pairs = [
+        apply_moq_rounding(
+            float(row.recommended_qty or 0),
+            int(row.min_ship_qty or 1) if pd.notna(row.min_ship_qty) else 1,
+            int(row.multiplicity or 1) if pd.notna(row.multiplicity) else 1,
+        )
+        for row in orders.itertuples(index=False)
+    ]
+    orders = orders.copy()
+    orders["moq_final_qty"] = [pair[0] for pair in moq_pairs]
+    orders["moq_note"] = [pair[1] for pair in moq_pairs]
+
     st.subheader("Рекомендованные заказы")
     display = orders[
         [
@@ -353,8 +381,10 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
             "supplier_article",
             "name",
             "recommended_qty",
+            "moq_final_qty",
             "unit",
             "urgency",
+            "moq_note",
             "justification",
             "status",
             "current_stock",
@@ -368,8 +398,10 @@ def page_calculation(supplier_id: int | None, category: str | None) -> None:
             "supplier_article": "Артикул",
             "name": "Номенклатура",
             "recommended_qty": "Рекомендуемое кол-во",
+            "moq_final_qty": "Кол-во с MOQ",
             "unit": "Ед.",
             "urgency": "Срочность",
+            "moq_note": "MOQ-проверка",
             "justification": "Обоснование",
             "status": "Статус",
             "current_stock": "Остаток",

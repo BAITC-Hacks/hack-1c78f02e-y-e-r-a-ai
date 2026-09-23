@@ -606,3 +606,30 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def apply_moq_rounding(
+    recommended_qty: float, min_ship_qty: int, multiplicity: int
+) -> tuple[float, str]:
+    """
+    Проверяет и при необходимости округляет количество под условия поставщика:
+    минимальная партия отгрузки (min_ship_qty) и кратность (multiplicity).
+    Возвращает (итоговое_количество, человекочитаемое_пояснение).
+    """
+    qty = max(float(recommended_qty or 0), 0.0)
+    multiplicity = max(int(multiplicity or 1), 1)
+    min_ship_qty = max(int(min_ship_qty or 1), 1)
+
+    if qty <= 0:
+        return 0.0, "заказ не требуется"
+
+    rounded = ((qty + multiplicity - 1) // multiplicity) * multiplicity
+    rounded = max(rounded, min_ship_qty)
+
+    if rounded != qty:
+        return (
+            float(rounded),
+            f"округлено с {qty:.0f} до {rounded:.0f} "
+            f"(мин. партия {min_ship_qty}, кратность {multiplicity})",
+        )
+    return float(rounded), "соответствует условиям поставщика"
